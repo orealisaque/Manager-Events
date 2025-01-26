@@ -242,17 +242,26 @@ st.markdown("""
 # Função para carregar as credenciais do Google Calendar
 def load_google_credentials():
     try:
-        credentials = service_account.Credentials.from_service_account_file(
-            'credentials.json',
-            scopes=['https://www.googleapis.com/auth/calendar']
-        )
+        # Primeiro tenta carregar do arquivo local
+        if os.path.exists('credentials.json'):
+            credentials = service_account.Credentials.from_service_account_file(
+                'credentials.json',
+                scopes=['https://www.googleapis.com/auth/calendar']
+            )
+        # Se não encontrar, tenta carregar dos secrets do Streamlit
+        else:
+            credentials_dict = st.secrets["gcp_service_account"]
+            credentials = service_account.Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://www.googleapis.com/auth/calendar']
+            )
         return credentials
     except Exception as e:
         st.error(f"Erro ao carregar credenciais: {str(e)}")
         return None
 
 # Função para adicionar evento ao Google Calendar
-def add_to_calendar(event_name, event_date, event_link):
+def add_to_calendar(event_name, start_date, end_date, event_link):
     credentials = load_google_credentials()
     if credentials:
         try:
@@ -261,11 +270,11 @@ def add_to_calendar(event_name, event_date, event_link):
                 'summary': event_name,
                 'description': f"Link do evento: {event_link}",
                 'start': {
-                    'dateTime': event_date.isoformat(),
+                    'dateTime': start_date.isoformat(),
                     'timeZone': 'America/Sao_Paulo',
                 },
                 'end': {
-                    'dateTime': event_date.isoformat(),
+                    'dateTime': end_date.isoformat(),
                     'timeZone': 'America/Sao_Paulo',
                 },
             }
@@ -391,7 +400,8 @@ if selected == "Dashboard":
             opcoes_eventos = []
             for _, evento in eventos_filtrados.iterrows():
                 dias_ate = (evento['Data do Evento'] - data_atual).days
-                opcao = f"{evento['Nome do Evento']} - Em {dias_ate} dias - {temperatura_to_emoji(evento['Temperatura'])}"
+                data_formatada = evento['Data do Evento'].strftime('%d/%m/%Y %H:%M')
+                opcao = f"{evento['Nome do Evento']} - {data_formatada} - {temperatura_to_emoji(evento['Temperatura'])}"
                 opcoes_eventos.append(opcao)
             
             eventos_selecionados = st.multiselect(
@@ -413,12 +423,11 @@ if selected == "Dashboard":
                     
                     # Criar string de tempo até o evento
                     if dias_ate_evento > 0:
-                        tempo_str = f"🕒 Em {dias_ate_evento} dias"
+                        tempo_str = f"🕒 {evento['Data do Evento'].strftime('%d/%m/%Y às %H:%M')}"
                     elif horas_ate_evento > 0:
-                        tempo_str = f"🕒 Em {horas_ate_evento} horas"
+                        tempo_str = f"🕒 Hoje às {evento['Data do Evento'].strftime('%H:%M')}"
                     else:
-                        minutos = ((evento['Data do Evento'] - data_atual).seconds // 60) % 60
-                        tempo_str = f"🕒 Em {minutos} minutos"
+                        tempo_str = f"🕒 Hoje às {evento['Data do Evento'].strftime('%H:%M')}"
                     
                     # Definir cor da borda baseada no status
                     borda_cor = "#4CAF50" if evento['Andamento'] == "Não começou" else "#FFA500"
@@ -510,8 +519,8 @@ elif selected == "Adicionar Lançamento":
         
         with col2:
             st.markdown("### Data de Fim")
-            data_fim = st.date_input("Data", key="data_fim", value=data_inicio)
-            hora_fim = st.time_input("Hora", key="hora_fim", value=hora_inicio)
+            data_fim = st.date_input("Data", key="data_fim")
+            hora_fim = st.time_input("Hora", key="hora_fim")
         
         # Validação das datas
         datetime_inicio = datetime.combine(data_inicio, hora_inicio)
@@ -521,7 +530,7 @@ elif selected == "Adicionar Lançamento":
             st.error("A data de fim não pode ser anterior à data de início!")
         
         # Formatação do período para exibição (mais simples, apenas com hora)
-        periodo = f"{data_inicio.strftime('%d/%m/%Y')} {hora_inicio.strftime('%H')}h - {data_fim.strftime('%d/%m/%Y')} {hora_fim.strftime('%H')}h"
+        periodo = f"{data_inicio.strftime('%d/%m/%Y')} {hora_inicio.strftime('%H:%M')}h - {data_fim.strftime('%d/%m/%Y')} {hora_fim.strftime('%H:%M')}h"
         st.markdown(f"""
         <div style="
             background-color: #2b2b2b;
@@ -549,44 +558,27 @@ elif selected == "Adicionar Lançamento":
         
         if submitted and nome:
             if datetime_fim >= datetime_inicio:
-                # Verificar se já existe evento com o mesmo nome
-                evento_existente = st.session_state.data[
-                    st.session_state.data['Nome do Evento'].str.lower() == nome.lower()
-                ]
+                # Adicionar ao Google Calendar
+                if link_evento:
+                    calendar_success = add_to_calendar(nome, datetime_inicio, datetime_fim, link_evento)
                 
-                # Verificar se já existe evento no mesmo período
-                eventos_periodo = st.session_state.data[
-                    (st.session_state.data['Data do Evento'] <= datetime_fim) &
-                    (st.session_state.data['Data de Fim'] >= datetime_inicio)
-                ]
+                # Adicionar ao DataFrame
+                novo_lancamento = pd.DataFrame({
+                    'Nome do Evento': [nome],
+                    'Data do Evento': [datetime_inicio],
+                    'Data de Fim': [datetime_fim],
+                    'Link Evento': [link_evento],
+                    'Andamento': [andamento],
+                    'Temperatura': [temperatura],
+                    'Link do Grupo': [link_grupo],
+                    'Período': [periodo]
+                })
                 
-                if not evento_existente.empty:
-                    st.error("Já existe um evento com este nome!")
-                elif not eventos_periodo.empty:
-                    eventos_conflito = ", ".join(eventos_periodo['Nome do Evento'].tolist())
-                    st.error(f"Existe(m) evento(s) conflitante(s) no mesmo período: {eventos_conflito}")
-                else:
-                    # Adicionar ao Google Calendar
-                    if link_evento:
-                        calendar_success = add_to_calendar(nome, datetime_inicio, link_evento)
-                    
-                    # Adicionar ao DataFrame
-                    novo_lancamento = pd.DataFrame({
-                        'Nome do Evento': [nome],
-                        'Data do Evento': [datetime_inicio],
-                        'Data de Fim': [datetime_fim],
-                        'Link Evento': [link_evento],
-                        'Andamento': [andamento],
-                        'Temperatura': [temperatura],
-                        'Link do Grupo': [link_grupo],
-                        'Período': [periodo]
-                    })
-                    
-                    st.session_state.data = pd.concat([st.session_state.data, novo_lancamento], ignore_index=True)
-                    save_data_to_csv()
-                    st.success("Lançamento adicionado com sucesso!")
-                    if link_evento and calendar_success:
-                        st.success("Evento adicionado ao Google Calendar!")
+                st.session_state.data = pd.concat([st.session_state.data, novo_lancamento], ignore_index=True)
+                save_data_to_csv()
+                st.success("Lançamento adicionado com sucesso!")
+                if link_evento and calendar_success:
+                    st.success("Evento adicionado ao Google Calendar!")
             else:
                 st.error("Por favor, corrija as datas antes de adicionar o evento.")
 
@@ -748,7 +740,7 @@ elif selected == "Visualizar Lançamentos":
                         datetime_inicio_edit = datetime.combine(data_inicio_edit, hora_inicio_edit)
                         datetime_fim_edit = datetime.combine(data_fim_edit, hora_fim_edit)
                         
-                        periodo_edit = f"{data_inicio_edit.strftime('%d/%m/%Y')} {hora_inicio_edit.strftime('%H')}h - {data_fim_edit.strftime('%d/%m/%Y')} {hora_fim_edit.strftime('%H')}h"
+                        periodo_edit = f"{data_inicio_edit.strftime('%d/%m/%Y')} {hora_inicio_edit.strftime('%H:%M')}h - {data_fim_edit.strftime('%d/%m/%Y')} {hora_fim_edit.strftime('%H:%M')}h"
                         
                         link_evento_edit = st.text_input("Link do Evento", value=row['Link Evento'] if pd.notna(row['Link Evento']) else "")
                         andamento_edit = st.selectbox("Andamento", ["Não começou", "Em andamento", "Finalizado"], index=["Não começou", "Em andamento", "Finalizado"].index(row['Andamento']))
@@ -802,7 +794,7 @@ elif selected == "Tabela":
     with col2:
         filtro_temp = st.multiselect(
             "Temperatura",
-            options=["❄️ FRIO", "🙃 MORNO", "🔥 QUENTE"]
+            options=["❄️ FRIO", "🙃 MORNO", "�� QUENTE"]
         )
     
     # Busca
@@ -825,7 +817,9 @@ elif selected == "Tabela":
         df_tabela = df_tabela[df_tabela['Temperatura_Label'].isin(filtro_temp)]
     
     # Preparar dados para exibição
-    df_display = df_tabela[['Nome do Evento', 'Período', 'Andamento', 'Temperatura']].copy()
+    df_display = df_tabela[['Nome do Evento', 'Data do Evento', 'Data de Fim', 'Andamento', 'Temperatura']].copy()
+    df_display['Data do Evento'] = df_display['Data do Evento'].dt.strftime('%d/%m/%Y %H:%M')
+    df_display['Data de Fim'] = df_display['Data de Fim'].dt.strftime('%d/%m/%Y %H:%M')
     df_display['Temperatura'] = df_display['Temperatura'].apply(temperatura_to_emoji)
     
     # Exibir tabela
@@ -833,6 +827,8 @@ elif selected == "Tabela":
         df_display,
         column_config={
             "Nome do Evento": "Evento",
+            "Data do Evento": "Início",
+            "Data de Fim": "Fim",
             "Temperatura": "🌡️",
         },
         hide_index=True,
